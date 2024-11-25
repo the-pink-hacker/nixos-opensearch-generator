@@ -5,7 +5,7 @@ use mime::Mime;
 use reqwest::Url;
 use scraper::Html;
 use serde::Deserialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{rust::deserialize_ignore_any, serde_as, DisplayFromStr};
 
 const META_TAG_REL: &str = "search";
 const META_TAG_TYPE: &str = "application/opensearchdescription+xml";
@@ -51,9 +51,8 @@ enum OpenSearchDescriptionXmlValue {
     Image(OpenSearchImage),
     Url(OpenSearchUrl),
 
-    // serde_xml_rs fails to deserialize when this isn't parsed.
-    #[allow(unused)]
-    SearchForm(Url),
+    #[serde(other, deserialize_with = "deserialize_ignore_any")]
+    Other,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +79,7 @@ impl From<OpenSearchDescriptionXml> for OpenSearchDescription {
                 OpenSearchDescriptionXmlValue::Description(provided_description) => description
                     .set(provided_description)
                     .expect("Multiple descriptions were provided"),
-                OpenSearchDescriptionXmlValue::SearchForm(_) => (),
+                OpenSearchDescriptionXmlValue::Other => (),
             }
         }
 
