@@ -1,9 +1,11 @@
 use std::cell::OnceCell;
 
 use clap::Parser;
+use mime::Mime;
 use reqwest::Url;
 use scraper::Html;
 use serde::Deserialize;
+use serde_with::{serde_as, DisplayFromStr};
 
 const META_TAG_REL: &str = "search";
 const META_TAG_TYPE: &str = "application/opensearchdescription+xml";
@@ -15,6 +17,31 @@ struct OpenSearchDescription {
     description: String,
     images: Vec<OpenSearchImage>,
     urls: Vec<OpenSearchUrl>,
+}
+
+impl OpenSearchDescription {
+    fn into_nix(&self, buf: &mut String) {
+        assert!(
+            !self.urls.is_empty(),
+            "OpenSearch requires at least one defined URL; none were found."
+        );
+
+        *buf += &format!("\"{}\" = {{\n    urls = [\n", self.short_name);
+
+        self.urls.iter().for_each(|url| url.into_nix(buf));
+
+        *buf += "    ];\n";
+
+        let mut sorted_images = self.images.clone();
+        sorted_images.sort();
+
+        sorted_images
+            .into_iter()
+            .next()
+            .map(|image| image.into_nix(buf));
+
+        *buf += &format!("    description = \"{}\";\n}};", self.description);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,21 +93,81 @@ impl From<OpenSearchDescriptionXml> for OpenSearchDescription {
     }
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 struct OpenSearchUrl {
-    r#type: String,
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "type")]
+    template_type: Mime,
     template: Url,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+impl OpenSearchUrl {
+    fn into_nix(&self, buf: &mut String) {
+        let mut queryless_template = self.template.clone();
+        queryless_template.set_query(None);
+
+        *buf += "        {\n";
+        *buf += &format!("            template = \"{}\";\n", queryless_template);
+        *buf += &format!("            type = \"{}\";\n", self.template_type);
+
+        if self.template.query().is_some() {
+            *buf += "            params = [\n";
+
+            for (parameter_key, parameter_value) in self.template.query_pairs() {
+                *buf += "                {\n";
+                *buf += &format!("                    name = \"{}\";\n", parameter_key);
+                *buf += &format!("                    value = \"{}\";\n", parameter_value);
+                *buf += "                }\n";
+            }
+
+            *buf += "            ];\n";
+        }
+
+        *buf += "        }\n";
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Deserialize, Clone, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 struct OpenSearchImage {
-    r#type: String,
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "type")]
+    image_type: Mime,
     width: Option<u16>,
     height: Option<u16>,
     #[serde(rename = "$value")]
     url: Url,
+}
+
+impl OpenSearchImage {
+    fn into_nix(&self, buf: &mut String) {
+        *buf += &format!("    iconUpdateURL = \"{}\";\n", self.url);
+    }
+}
+
+impl Ord for OpenSearchImage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.image_type == other.image_type {
+            let width = self.width.unwrap_or_default();
+            let height = self.height.unwrap_or_default();
+            let other_width = other.width.unwrap_or_default();
+            let other_height = other.height.unwrap_or_default();
+            let size_order = (other_width * other_height).cmp(&(width * height));
+
+            size_order
+        } else {
+            std::cmp::Ordering::Equal
+        }
+    }
+}
+
+impl PartialOrd for OpenSearchImage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// Fetches a html webpage and extracts the open-search protocol information.
@@ -187,7 +274,14 @@ async fn main() {
 
     let opensearch = deserialize_opensearch_xml(opensearch_raw);
 
-    println!("{:#?}", opensearch);
+    if args.verbose {
+        println!("Serializing into Nix...");
+    }
+
+    let mut nix = String::new();
+    opensearch.into_nix(&mut nix);
+
+    println!("{}", nix);
 }
 
 #[cfg(test)]
